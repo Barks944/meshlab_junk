@@ -2,7 +2,6 @@ import meshtastic
 import meshtastic.tcp_interface
 import time
 import logging
-import socket
 import datetime
 import argparse
 
@@ -15,25 +14,10 @@ MESHTASTIC_PORT = 4403  # Default TCP port for Meshtastic
 RETRY_COUNT = 3  # Number of retries for connection
 RETRY_DELAY = 5  # Seconds to wait between retries
 
-def check_device_connection(ip, port=4403, timeout=5):
-    """Check if the device is reachable via TCP port."""
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            logger.info(f"TCP connection to {ip}:{port} succeeded")
-            return True
-    except (socket.timeout, ConnectionRefusedError, OSError) as e:
-        logger.error(f"TCP connection to {ip}:{port} failed: {str(e)}")
-        return False
-
 def send_message(ip, message):
     interface = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            # Verify device is reachable
-            if not check_device_connection(ip, MESHTASTIC_PORT):
-                logger.error(f"Device at {ip} is not reachable. Check network, IP, or device status.")
-                return
-
             # Connect to the device via TCP
             logger.info(f"Attempt {attempt}/{RETRY_COUNT}: Connecting to device at {ip}...")
             interface = meshtastic.tcp_interface.TCPInterface(ip)
@@ -66,10 +50,14 @@ def send_message(ip, message):
                     logger.error(f"Error closing interface: {str(e)}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Send message to Meshtastic channel")
+    parser = argparse.ArgumentParser(
+        description="Send message to Meshtastic channel",
+        epilog="Example: python send_channel_message.py 192.168.86.39 'Hello World'"
+    )
     parser.add_argument("ip", help="The IP address of the device")
     parser.add_argument("message", help="The message to send")
     args = parser.parse_args()
-    compact_dt = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+    now = datetime.datetime.now()
+    compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
     full_message = f"{compact_dt} {args.message}"
     send_message(args.ip, full_message)
