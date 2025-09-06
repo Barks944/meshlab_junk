@@ -56,13 +56,27 @@ if __name__ == "__main__":
     parser.add_argument("ip", help="The IP address of the device")
     parser.add_argument("channel", type=int, help="The channel index to send to (must not be 0)")
     parser.add_argument("message", help="The message to send")
+    parser.add_argument("--repeat-every", type=int, default=None, help="Repeat the message every X seconds. If not specified, send once.")
     args = parser.parse_args()
     
     # Validate channel
     if args.channel == 0:
         parser.error("Channel 0 is not allowed. Please use a channel index from 1-7.")
     
-    now = datetime.datetime.now()
-    compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-    full_message = f"{compact_dt} {args.message}"
-    send_message(args.ip, args.channel, full_message)
+    if args.repeat_every:
+        logger.info(f"Repeating message every {args.repeat_every} seconds. Press Ctrl+C to stop.")
+        try:
+            while True:
+                now = datetime.datetime.now()
+                compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
+                full_message = f"{compact_dt} {args.message}"
+                send_message(args.ip, args.channel, full_message)
+                logger.info(f"Waiting {args.repeat_every} seconds before sending next message.")
+                time.sleep(args.repeat_every)
+        except KeyboardInterrupt:
+            logger.info("Script stopped by user.")
+    else:
+        now = datetime.datetime.now()
+        compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
+        full_message = f"{compact_dt} {args.message}"
+        send_message(args.ip, args.channel, full_message)
