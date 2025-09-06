@@ -9,12 +9,11 @@ import argparse
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-CHANNEL_INDEX = 1
 MESHTASTIC_PORT = 4403  # Default TCP port for Meshtastic
 RETRY_COUNT = 3  # Number of retries for connection
 RETRY_DELAY = 5  # Seconds to wait between retries
 
-def send_message(ip, message):
+def send_message(ip, channel, message):
     interface = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
@@ -29,8 +28,8 @@ def send_message(ip, message):
                 return
 
             # Send message to the specified channel
-            logger.info(f"Sending message: '{message}' to channel {CHANNEL_INDEX}")
-            interface.sendText(message, channelIndex=CHANNEL_INDEX)
+            logger.info(f"Sending message: '{message}' to channel {channel}")
+            interface.sendText(message, channelIndex=channel)
             logger.info("Message sent successfully")
             break  # Exit retry loop on success
 
@@ -52,12 +51,18 @@ def send_message(ip, message):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Send message to Meshtastic channel",
-        epilog="Example: python send_channel_message.py 192.168.86.39 'Hello World'"
+        epilog="Example: python send_channel_message.py 192.168.86.39 1 'Hello World'"
     )
     parser.add_argument("ip", help="The IP address of the device")
+    parser.add_argument("channel", type=int, help="The channel index to send to (must not be 0)")
     parser.add_argument("message", help="The message to send")
     args = parser.parse_args()
+    
+    # Validate channel
+    if args.channel == 0:
+        parser.error("Channel 0 is not allowed. Please use a channel index from 1-7.")
+    
     now = datetime.datetime.now()
     compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
     full_message = f"{compact_dt} {args.message}"
-    send_message(args.ip, full_message)
+    send_message(args.ip, args.channel, full_message)
