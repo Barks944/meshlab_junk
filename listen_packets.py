@@ -11,8 +11,6 @@ import re
 import os
 import signal
 
-DEVICE_IP = "192.168.86.39"
-
 # Global node name cache
 node_names = {}
 
@@ -44,6 +42,7 @@ class MeshtasticErrorHandler(logging.Handler):
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Listen to Meshtastic packets with filtering options')
+    parser.add_argument('--ip', default='192.168.86.39', help='IP address of the Meshtastic device (default: 192.168.86.39)')
     parser.add_argument('--filter-type', nargs='*', help='Filter by message types (e.g., NodeInfo, MeshPacket, Config, Channel)')
     parser.add_argument('--filter-node', nargs='*', help='Filter by node IDs (hex format like 0x9eecae9c or names)')
     parser.add_argument('--filter-port', nargs='*', help='Filter by port numbers or names (e.g., 1, TEXT_MESSAGE_APP)')
@@ -213,7 +212,7 @@ def listen_with_reconnect(args):
                     print(f"\n--- RECONNECTING ---")
                 # Reset the error flag before attempting connection
                 connection_error_detected = False
-                interface = connect_with_retry(DEVICE_IP, args)
+                interface = connect_with_retry(args.ip, args)
                 if interface is None:
                     break
                 connection_lost = False
