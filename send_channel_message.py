@@ -79,7 +79,7 @@ class MeshtasticSender:
         # This method is no longer needed as we use handlers
         pass
 
-    def send_message(self, channel, message):
+    def send_message(self, channel, message, no_wait=False):
         try:
             logger.info(f"Sending message: '{message}' to channel {channel}")
             # Send the message
@@ -90,6 +90,10 @@ class MeshtasticSender:
 
             packet_id = sent_packet.id
             logger.info(f"Message sent with packet ID: {packet_id}")
+
+            if no_wait:
+                logger.info("Skipping QueueStatus confirmation as requested")
+                return True
 
             # Wait for QueueStatus
             start_time = time.time()
@@ -131,6 +135,7 @@ def main():
     parser.add_argument("channel", type=int, help="The channel index to send to (must not be 0)")
     parser.add_argument("message", help="The message to send")
     parser.add_argument("--repeat-every", type=int, default=None, help="Repeat the message every X seconds. If not specified, send once.")
+    parser.add_argument("--no-wait", action="store_true", help="Skip waiting for QueueStatus confirmation and assume send success if no exception occurs")
     args = parser.parse_args()
     
     # Validate channel
@@ -141,23 +146,25 @@ def main():
     if not sender.connect():
         return
 
+    sequence = 0
     try:
         if args.repeat_every:
             logger.info(f"Repeating message every {args.repeat_every} seconds. Press Ctrl+C to stop.")
             while True:
                 now = datetime.datetime.now()
                 compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-                full_message = f"{compact_dt} {args.message}"
-                success = sender.send_message(args.channel, full_message)
+                full_message = f"{compact_dt} #{sequence} {args.message}"
+                success = sender.send_message(args.channel, full_message, no_wait=args.no_wait)
                 if not success:
                     logger.warning("Send failed, but continuing repeat...")
                 logger.info(f"Waiting {args.repeat_every} seconds before sending next message.")
                 time.sleep(args.repeat_every)
+                sequence = (sequence + 1) % 1000
         else:
             now = datetime.datetime.now()
             compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
             full_message = f"{compact_dt} {args.message}"
-            sender.send_message(args.channel, full_message)
+            sender.send_message(args.channel, full_message, no_wait=args.no_wait)
     except KeyboardInterrupt:
         logger.info("Script stopped by user.")
     finally:
