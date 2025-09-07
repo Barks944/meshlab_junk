@@ -9,12 +9,15 @@ A collection of Python scripts for interacting with Meshtastic devices over TCP,
 - **Haiku Generation**: Generate AI-powered haiku poems about the Forest of Dean and send them to the mesh.
 - **Packet Listening**: Monitor incoming packets with advanced filtering, logging, and reconnection capabilities.
 - **Reliability**: Built-in retries, error handling, and firmware confirmation for message queuing.
+- **Modular Architecture**: Shared `MeshtasticSender` class for consistent, reliable message sending across scripts.
+- **Performance**: Direct imports eliminate subprocess overhead for faster, more reliable execution.
 - **Command-Line Interface**: Flexible CLI with multiple options for customization.
 
 ## Files
 
+- `meshtastic_sender.py`: Core module containing the `MeshtasticSender` class for reliable message sending with connection management, retries, and QueueStatus confirmation.
 - `send_channel_message.py`: Send messages to Meshtastic channels with timestamp, optional repeat, sequence numbers, and QueueStatus confirmation.
-- `generate_haiku_and_send.py`: Generate haiku using local AI (LMStudio) and send via `send_channel_message.py`.
+- `generate_haiku_and_send.py`: Generate haiku using local AI (LMStudio) and send directly using the `MeshtasticSender` module.
 - `listen_packets.py`: Listen for incoming packets with comprehensive filtering, logging, and display options.
 - `README.md`: This documentation file.
 
@@ -24,6 +27,7 @@ A collection of Python scripts for interacting with Meshtastic devices over TCP,
 - Meshtastic library: `pip install meshtastic`
 - For haiku generation: [LMStudio](https://lmstudio.ai/) running locally on port 1234 with a compatible model (e.g., GPT-OSS-20B)
 - A Meshtastic device configured for TCP connections (default port 4403)
+- All scripts use the shared `meshtastic_sender.py` module for consistent, reliable message sending
 
 ## Usage
 
@@ -133,9 +137,10 @@ python listen_packets.py --list-ports
 
 - **IP Address**: Configurable per script (default: 192.168.86.39)
 - **Channel**: Specified as argument (1-7)
-- **Retries**: 3 attempts with 5-second delays (hardcoded in scripts)
-- **QueueStatus Timeout**: 10 seconds for confirmation (in `send_channel_message.py`)
+- **Retries**: 3 attempts with 5-second delays (configured in `meshtastic_sender.py`)
+- **QueueStatus Timeout**: 10 seconds for confirmation (in `meshtastic_sender.py`)
 - **LMStudio**: Ensure running on localhost:1234 for haiku generation
+- **Modular Architecture**: All sending scripts use the same `MeshtasticSender` class for consistent behavior
 
 ## Troubleshooting
 
@@ -144,6 +149,8 @@ python listen_packets.py --list-ports
 - For haiku generation, verify LMStudio is running with a compatible model.
 - Use the Meshtastic CLI (`meshtastic --host <IP> --listen`) to verify device connectivity.
 - If connection fails, check device configuration and TCP server settings.
+- **Modular Architecture**: All sending functionality is now centralized in `meshtastic_sender.py` - check this module for connection and sending issues.
+- **Performance**: Direct imports eliminate subprocess overhead; if you experience delays, ensure all required modules are properly installed.
 
 ## Contributing
 
