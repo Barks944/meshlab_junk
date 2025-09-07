@@ -40,6 +40,37 @@ class MeshtasticErrorHandler(logging.Handler):
                 connection_error_detected = True
                 break
 
+def safe_encode_text(text):
+    """Safely encode text for printing, replacing problematic Unicode characters"""
+    if not text:
+        return text
+    
+    # Replace common problematic Unicode characters with safe alternatives
+    replacements = {
+        '\u202f': ' ',  # narrow no-break space -> regular space
+        '\u00a0': ' ',  # no-break space -> regular space
+        '\u2007': ' ',  # figure space -> regular space
+        '\u200b': '',   # zero-width space -> remove
+        '\ufeff': '',   # zero-width no-break space -> remove
+        '\u2013': '-',  # en dash -> hyphen
+        '\u2014': '-',  # em dash -> hyphen
+        '\u2018': "'",  # left single quotation mark -> apostrophe
+        '\u2019': "'",  # right single quotation mark -> apostrophe
+        '\u201c': '"',  # left double quotation mark -> quote
+        '\u201d': '"',  # right double quotation mark -> quote
+    }
+    
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    
+    # For any remaining problematic characters, replace with a safe placeholder
+    try:
+        text.encode('cp1252', errors='ignore').decode('cp1252')
+        return text
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        # If encoding still fails, replace all non-ASCII characters
+        return ''.join(c if ord(c) < 128 else '?' for c in text)
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Listen to Meshtastic packets with filtering options')
     parser.add_argument('--ip', default='192.168.86.39', help='IP address of the Meshtastic device (default: 192.168.86.39)')
@@ -305,7 +336,7 @@ def listen_with_reconnect(args, log_file=None):
                                             
                                             if text_content:
                                                 if args.show_text:
-                                                    payload_info += f" | Text:'{text_content}'"
+                                                    payload_info += f" | Text:'{safe_encode_text(text_content)}'"
                                                 else:
                                                     payload_info += f" | TextLen:{len(text_content)}"
                                             else:
@@ -435,10 +466,22 @@ def listen_with_reconnect(args, log_file=None):
                             packet_summary = " | ".join(info_parts)
                             
                             line = f"[{timestamp}] PACKET: {packet_summary}"
-                            print(line)
+                            try:
+                                print(line)
+                            except UnicodeEncodeError:
+                                # If printing fails, try with safe encoding
+                                safe_line = safe_encode_text(line)
+                                print(safe_line)
+                            
                             if log_file:
-                                log_file.write(line + '\n')
-                                log_file.flush()
+                                try:
+                                    log_file.write(line + '\n')
+                                    log_file.flush()
+                                except UnicodeEncodeError:
+                                    # If writing to log fails, try with safe encoding
+                                    safe_line = safe_encode_text(line)
+                                    log_file.write(safe_line + '\n')
+                                    log_file.flush()
                         
                         # Call the original handler to maintain normal operation
                         return original_packet_handler(meshPacket, hack)
@@ -563,10 +606,20 @@ def listen_with_reconnect(args, log_file=None):
                                     info_str += f"...({len(fromRadioBytes)} total)"
                                 
                                 line = f"[{timestamp}] FROM_RADIO: {info_str}"
-                                print(line)
+                                try:
+                                    print(line)
+                                except UnicodeEncodeError:
+                                    safe_line = safe_encode_text(line)
+                                    print(safe_line)
+                                
                                 if log_file:
-                                    log_file.write(line + '\n')
-                                    log_file.flush()
+                                    try:
+                                        log_file.write(line + '\n')
+                                        log_file.flush()
+                                    except UnicodeEncodeError:
+                                        safe_line = safe_encode_text(line)
+                                        log_file.write(safe_line + '\n')
+                                        log_file.flush()
                             
                         except Exception as e:
                             # Show raw bytes even on decode error (if not filtered out)
@@ -576,10 +629,20 @@ def listen_with_reconnect(args, log_file=None):
                                 if len(fromRadioBytes) > 32:
                                     error_info += f"...({len(fromRadioBytes)} total)"
                                 line = f"[{timestamp}] FROM_RADIO: {error_info}"
-                                print(line)
+                                try:
+                                    print(line)
+                                except UnicodeEncodeError:
+                                    safe_line = safe_encode_text(line)
+                                    print(safe_line)
+                                
                                 if log_file:
-                                    log_file.write(line + '\n')
-                                    log_file.flush()
+                                    try:
+                                        log_file.write(line + '\n')
+                                        log_file.flush()
+                                    except UnicodeEncodeError:
+                                        safe_line = safe_encode_text(line)
+                                        log_file.write(safe_line + '\n')
+                                        log_file.flush()
                         
                         # Call the original handler to maintain normal operation
                         return original_from_radio(fromRadioBytes)
