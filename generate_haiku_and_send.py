@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 def validate_and_clean_haiku(haiku):
     """Validate and clean haiku to ensure only allowed special characters remain"""
     if not haiku:
-        return haiku
+        return "No haiuku!"
     
     # Define allowed special characters
     allowed_chars = {'.', ',', ';'}
