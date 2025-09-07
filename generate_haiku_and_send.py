@@ -9,6 +9,41 @@ from meshtastic_sender import MeshtasticSender
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def validate_and_clean_haiku(haiku):
+    """Validate and clean haiku to ensure only allowed special characters remain"""
+    if not haiku:
+        return haiku
+    
+    # Define allowed special characters
+    allowed_chars = {'.', ',', ';'}
+    
+    # Remove any characters that are not letters, numbers, spaces, or allowed special chars
+    cleaned = []
+    for char in haiku:
+        if char.isalnum() or char.isspace() or char in allowed_chars:
+            cleaned.append(char)
+        # Replace other special characters with appropriate alternatives
+        elif char in {'!', '?', ':', '-', '—', '–', '…', '(', ')', '[', ']', '{', '}', '"', "'", '“', '”', '‘', '’'}:
+            # Replace punctuation with period or comma where appropriate
+            if char in {'!', '?', ':'}:
+                cleaned.append('.')
+            elif char in {'-', '—', '–'}:
+                cleaned.append(',')
+            # Skip other punctuation marks
+        else:
+            # Replace any other special characters with space
+            cleaned.append(' ')
+    
+    # Join and clean up extra spaces
+    result = ''.join(cleaned)
+    result = ' '.join(result.split())  # Remove extra spaces
+    
+    # Ensure we have some content
+    if not result.strip():
+        return "Silent forest whispers"
+    
+    return result.strip()
+
 def generate_haiku():
     logger.info("Starting haiku generation...")
     try:
@@ -21,13 +56,21 @@ def generate_haiku():
         payload = {
             "model": "openai/gpt-oss-20b",  # Adjust if your model has a specific name
             "messages": [
-                {"role": "user", "content": f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean. Consider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."}
+                {"role": "user", "content": f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean. Use ONLY these special characters: periods (.), commas (,), semicolons (;). Do NOT use exclamation marks, question marks, colons, dashes, quotes, parentheses, or any other special characters. Consider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."}
             ],
             "temperature": 1.5
         }
         response = requests.post(url, json=payload)
         response.raise_for_status()
         haiku = response.json()["choices"][0]["message"]["content"].strip()
+        
+        # Validate and clean the haiku
+        original_haiku = haiku
+        haiku = validate_and_clean_haiku(haiku)
+        
+        if haiku != original_haiku:
+            logger.info(f"Cleaned haiku: '{original_haiku}' -> '{haiku}'")
+        
         logger.info(f"Generated haiku: {haiku}")
         return haiku
     except Exception as e:
