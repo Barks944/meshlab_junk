@@ -90,6 +90,7 @@ Send repeating haiku:
 ```bash
 python generate_haiku_and_send.py 192.168.86.39 2 --repeat-every 3600
 ```
+Output: `9/7/25@1214 #0 [AI-generated haiku]`, `9/7/25@1314 #1 [AI-generated haiku]`, etc.
 
 ### Listening for Packets (`listen_packets.py`)
 

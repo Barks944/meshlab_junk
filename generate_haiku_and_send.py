@@ -60,14 +60,16 @@ if __name__ == "__main__":
     
     if args.repeat_every:
         logger.info(f"Repeating every {args.repeat_every} seconds. Press Ctrl+C to stop.")
+        sequence = 0
         try:
             while True:
                 haiku = generate_haiku()
                 if haiku:
                     now = datetime.datetime.now()
                     compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-                    full_haiku = f"{compact_dt} {haiku}"
+                    full_haiku = f"{compact_dt} #{sequence} {haiku}"
                     send_haiku(full_haiku, args.ip, args.channel)
+                    sequence = (sequence + 1) % 1000
                 else:
                     logger.error("No haiku generated, skipping send.")
                 time.sleep(args.repeat_every)
