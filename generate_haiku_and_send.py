@@ -124,27 +124,31 @@ def main():
         sequence = 0
         try:
             while True:
+                # Increment sequence number for this attempt (regardless of success/failure)
+                current_sequence = sequence
+                sequence = (sequence + 1) % 1000
+                
                 # Generate haiku before opening connection
                 haiku = generate_haiku()
                 if haiku:
                     now = datetime.datetime.now()
                     compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-                    full_haiku = f"{compact_dt} #{sequence} {haiku}"
+                    full_haiku = f"{compact_dt} #{current_sequence} {haiku}"
                     
                     # Open connection, send, then close
                     sender = MeshtasticSender(args.ip)
                     if sender.connect():
                         try:
                             if send_haiku(sender, args.channel, full_haiku):
-                                sequence = (sequence + 1) % 1000
+                                logger.info(f"Successfully sent haiku #{current_sequence}")
                             else:
-                                logger.warning(f"Failed to send haiku #{sequence} after retries")
+                                logger.warning(f"Failed to send haiku #{current_sequence} after retries")
                         finally:
                             sender.close()
                     else:
-                        logger.error("Failed to connect to Meshtastic device")
+                        logger.error(f"Failed to connect to Meshtastic device for haiku #{current_sequence}")
                 else:
-                    logger.error("No haiku generated, skipping send.")
+                    logger.error(f"No haiku generated for attempt #{current_sequence}, skipping send.")
                 
                 time.sleep(args.repeat_every)
         except KeyboardInterrupt:
