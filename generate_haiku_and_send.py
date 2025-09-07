@@ -10,6 +10,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 def generate_haiku():
+    logger.info("Starting haiku generation...")
     try:
         # Get current datetime
         now = datetime.datetime.now()
@@ -75,49 +76,55 @@ def main():
     if args.channel == 0:
         parser.error("Channel 0 is not allowed. Please use a channel index from 1-7.")
     
-    # Initialize MeshtasticSender
-    sender = MeshtasticSender(args.ip)
-    if not sender.connect():
-        logger.error("Failed to connect to Meshtastic device")
-        return
-    
-    try:
-        if args.repeat_every:
-            logger.info(f"Repeating every {args.repeat_every} seconds. Press Ctrl+C to stop.")
-            sequence = 0
-            current_haiku = None
-            try:
-                while True:
-                    # Generate haiku only if we don't have one to retry
-                    if current_haiku is None:
-                        current_haiku = generate_haiku()
+    if args.repeat_every:
+        logger.info(f"Repeating every {args.repeat_every} seconds. Press Ctrl+C to stop.")
+        sequence = 0
+        try:
+            while True:
+                # Generate haiku before opening connection
+                haiku = generate_haiku()
+                if haiku:
+                    now = datetime.datetime.now()
+                    compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
+                    full_haiku = f"{compact_dt} #{sequence} {haiku}"
                     
-                    if current_haiku:
-                        now = datetime.datetime.now()
-                        compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-                        full_haiku = f"{compact_dt} #{sequence} {current_haiku}"
-                        if send_haiku(sender, args.channel, full_haiku):
-                            # Success: clear current_haiku to generate new one next time
-                            current_haiku = None
-                            sequence = (sequence + 1) % 1000
-                        else:
-                            logger.warning(f"Failed to send haiku #{sequence} after retries, will retry same haiku")
+                    # Open connection, send, then close
+                    sender = MeshtasticSender(args.ip)
+                    if sender.connect():
+                        try:
+                            if send_haiku(sender, args.channel, full_haiku):
+                                sequence = (sequence + 1) % 1000
+                            else:
+                                logger.warning(f"Failed to send haiku #{sequence} after retries")
+                        finally:
+                            sender.close()
                     else:
-                        logger.error("No haiku generated, skipping send.")
-                    time.sleep(args.repeat_every)
-            except KeyboardInterrupt:
-                logger.info("Script stopped by user.")
-        else:
-            haiku = generate_haiku()
-            if haiku:
-                now = datetime.datetime.now()
-                compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
-                full_haiku = f"{compact_dt} {haiku}"
-                send_haiku(sender, args.channel, full_haiku)
+                        logger.error("Failed to connect to Meshtastic device")
+                else:
+                    logger.error("No haiku generated, skipping send.")
+                
+                time.sleep(args.repeat_every)
+        except KeyboardInterrupt:
+            logger.info("Script stopped by user.")
+    else:
+        # Single message: generate haiku first, then connect and send
+        haiku = generate_haiku()
+        if haiku:
+            now = datetime.datetime.now()
+            compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
+            full_haiku = f"{compact_dt} {haiku}"
+            
+            # Open connection, send, then close
+            sender = MeshtasticSender(args.ip)
+            if sender.connect():
+                try:
+                    send_haiku(sender, args.channel, full_haiku)
+                finally:
+                    sender.close()
             else:
-                logger.error("No haiku generated, skipping send.")
-    finally:
-        sender.close()
+                logger.error("Failed to connect to Meshtastic device")
+        else:
+            logger.error("No haiku generated, skipping send.")
 
 if __name__ == "__main__":
     main()
