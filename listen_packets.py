@@ -45,9 +45,12 @@ def parse_arguments():
     parser.add_argument('--ip', default='192.168.86.39', help='IP address of the Meshtastic device (default: 192.168.86.39)')
     parser.add_argument('--filter-type', nargs='*', help='Filter by message types (e.g., NodeInfo, MeshPacket, Config, Channel)')
     parser.add_argument('--filter-node', nargs='*', help='Filter by node IDs (hex format like 0x9eecae9c or names)')
+    parser.add_argument('--log-file', help='Log all packets to the specified file (one per line)')
     parser.add_argument('--filter-port', nargs='*', help='Filter by port numbers or names (e.g., 1, TEXT_MESSAGE_APP)')
+    parser.add_argument('--filter-channel', nargs='*', help='Filter by channel numbers (e.g., 2, 5)')
     parser.add_argument('--exclude-type', nargs='*', help='Exclude message types')
     parser.add_argument('--exclude-node', nargs='*', help='Exclude node IDs or names')
+    parser.add_argument('--exclude-channel', nargs='*', help='Exclude channel numbers')
     parser.add_argument('--show-unknown', action='store_true', help='Show unknown message types (default: hidden)')
     parser.add_argument('--quiet-sync', action='store_true', help='Hide repetitive sync messages (Config, ModuleConfig)')
     parser.add_argument('--packets-only', action='store_true', help='Show only decoded application layer packets (PACKET messages), hide FROM_RADIO transport layer')
@@ -128,8 +131,11 @@ def list_port_types():
     print()
     print("# Custom reconnection delay:")
     print("python listen_packets.py --reconnect-delay 10")
+    print()
+    print("# Log all packets to a file:")
+    print("python listen_packets.py --log-file packets.log")
 
-def should_show_message(msg_type, node_id, node_name, port_info, args):
+def should_show_message(msg_type, node_id, node_name, port_info, channel_info, args):
     """Determine if a message should be displayed based on filters"""
     
     # Handle quiet-sync mode
@@ -148,6 +154,10 @@ def should_show_message(msg_type, node_id, node_name, port_info, args):
         for exclude_node in args.exclude_node:
             if exclude_node.lower() in [str(node_id).lower(), str(node_name).lower()]:
                 return False
+    
+    if args.exclude_channel and channel_info is not None:
+        if str(channel_info) in args.exclude_channel:
+            return False
     
     # Handle include filters
     show_by_type = not args.filter_type or msg_type in args.filter_type
@@ -168,7 +178,13 @@ def should_show_message(msg_type, node_id, node_name, port_info, args):
                 show_by_port = True
                 break
     
-    return show_by_type and show_by_node and show_by_port
+    show_by_channel = True
+    if args.filter_channel and channel_info is not None:
+        show_by_channel = False
+        if str(channel_info) in args.filter_channel:
+            show_by_channel = True
+    
+    return show_by_type and show_by_node and show_by_port and show_by_channel
 
 def connect_with_retry(device_ip, args):
     """Connect to Meshtastic device with automatic retry logic"""
@@ -198,7 +214,7 @@ def connect_with_retry(device_ip, args):
     
     return None
 
-def listen_with_reconnect(args):
+def listen_with_reconnect(args, log_file=None):
     """Main listening loop with reconnection handling"""
     global connection_error_detected
     interface = None
@@ -231,6 +247,7 @@ def listen_with_reconnect(args):
                         node_name = ""
                         from_name = ""
                         to_name = ""
+                        channel_info = None
                         
                         # Basic packet info
                         if hasattr(meshPacket, 'id'):
@@ -248,7 +265,8 @@ def listen_with_reconnect(args):
                                 to_name = node_names.get(to_id, to_id)
                             packet_info.append(f"To:{to_name}")
                         if hasattr(meshPacket, 'channel'):
-                            packet_info.append(f"Ch:{meshPacket.channel}")
+                            channel_info = meshPacket.channel
+                            packet_info.append(f"Ch:{channel_info}")
                         if hasattr(meshPacket, 'hop_limit'):
                             packet_info.append(f"Hops:{meshPacket.hop_limit}")
                         if hasattr(meshPacket, 'want_ack'):
@@ -287,11 +305,11 @@ def listen_with_reconnect(args):
                                             
                                             if text_content:
                                                 if args.show_text:
-                                                    payload_info += f" Text:'{text_content}'"
+                                                    payload_info += f" | Text:'{text_content}'"
                                                 else:
-                                                    payload_info += f" TextLen:{len(text_content)}"
+                                                    payload_info += f" | TextLen:{len(text_content)}"
                                             else:
-                                                payload_info += f" Text:(no content found)"
+                                                payload_info += f" | Text:(no content found)"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'NODEINFO_APP') or decoded.portnum == 4:
                                             if hasattr(decoded, 'user'):
                                                 user = decoded.user
@@ -312,7 +330,7 @@ def listen_with_reconnect(args):
                                                 if hasattr(user, 'role'):
                                                     role_name = user.role.name if hasattr(user.role, 'name') else str(user.role)
                                                     user_info.append(f"Role:{role_name}")
-                                                payload_info += f" User:[{','.join(user_info)}]"
+                                                payload_info += f" | User:[{','.join(user_info)}]"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'POSITION_APP') or decoded.portnum == 3:
                                             if hasattr(decoded, 'position'):
                                                 pos = decoded.position
@@ -327,7 +345,7 @@ def listen_with_reconnect(args):
                                                     pos_info.append(f"Time:{pos.time}")
                                                 if hasattr(pos, 'PDOP'):
                                                     pos_info.append(f"PDOP:{pos.PDOP}")
-                                                payload_info += f" Pos:[{','.join(pos_info)}]"
+                                                payload_info += f" | Pos:[{','.join(pos_info)}]"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'TELEMETRY_APP') or decoded.portnum == 67:
                                             if hasattr(decoded, 'telemetry'):
                                                 tel = decoded.telemetry
@@ -352,19 +370,19 @@ def listen_with_reconnect(args):
                                                         tel_info.append(f"Humidity:{em.relative_humidity:.1f}%")
                                                     if hasattr(em, 'barometric_pressure'):
                                                         tel_info.append(f"Pressure:{em.barometric_pressure:.1f}hPa")
-                                                payload_info += f" Tel:[{','.join(tel_info)}]"
+                                                payload_info += f" | Tel:[{','.join(tel_info)}]"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'ROUTING_APP') or decoded.portnum == 2:
                                             if hasattr(decoded, 'routing'):
                                                 routing = decoded.routing
                                                 if hasattr(routing, 'error_reason'):
                                                     error_name = routing.error_reason.name if hasattr(routing.error_reason, 'name') else str(routing.error_reason)
-                                                    payload_info += f" Error:{error_name}"
+                                                    payload_info += f" | Error:{error_name}"
                                                 else:
-                                                    payload_info += f" ACK"
+                                                    payload_info += f" | ACK"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'ADMIN_APP') or decoded.portnum == 6:
-                                            payload_info += f" Admin"
+                                            payload_info += f" | Admin"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'REMOTE_HARDWARE_APP') or decoded.portnum == 64:
-                                            payload_info += f" RemoteHW"
+                                            payload_info += f" | RemoteHW"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'WAYPOINT_APP') or decoded.portnum == 34:
                                             if hasattr(decoded, 'waypoint'):
                                                 wp = decoded.waypoint
@@ -375,48 +393,52 @@ def listen_with_reconnect(args):
                                                     wp_info.append(f"Lat:{wp.latitude_i/1e7:.6f}")
                                                 if hasattr(wp, 'longitude_i') and wp.longitude_i:
                                                     wp_info.append(f"Lon:{wp.longitude_i/1e7:.6f}")
-                                                payload_info += f" Waypoint:[{','.join(wp_info)}]"
+                                                payload_info += f" | Waypoint:[{','.join(wp_info)}]"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'NEIGHBORINFO_APP') or decoded.portnum == 5:
-                                            payload_info += f" NeighborInfo"
+                                            payload_info += f" | NeighborInfo"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'TRACEROUTE_APP') or decoded.portnum == 70:
                                             if hasattr(decoded, 'route'):
                                                 route = decoded.route
                                                 if hasattr(route, 'route') and route.route:
                                                     route_nodes = [node_names.get(hex(node), hex(node)) for node in route.route]
-                                                    payload_info += f" Route:[{' -> '.join(route_nodes)}]"
+                                                    payload_info += f" | Route:[{' -> '.join(route_nodes)}]"
                                                 else:
-                                                    payload_info += f" TraceRoute"
+                                                    payload_info += f" | TraceRoute"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'AUDIO_APP') or decoded.portnum == 65:
-                                            payload_info += f" Audio"
+                                            payload_info += f" | Audio"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'DETECTION_SENSOR_APP') or decoded.portnum == 68:
-                                            payload_info += f" Detection"
+                                            payload_info += f" | Detection"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'REPLY_APP') or decoded.portnum == 32:
-                                            payload_info += f" Reply"
+                                            payload_info += f" | Reply"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'IP_TUNNEL_APP') or decoded.portnum == 33:
-                                            payload_info += f" IPTunnel"
+                                            payload_info += f" | IPTunnel"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'PAXCOUNTER_APP') or decoded.portnum == 35:
-                                            payload_info += f" PaxCounter"
+                                            payload_info += f" | PaxCounter"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'SERIAL_APP') or decoded.portnum == 64:
-                                            payload_info += f" Serial"
+                                            payload_info += f" | Serial"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'STORE_FORWARD_APP') or decoded.portnum == 66:
-                                            payload_info += f" StoreForward"
+                                            payload_info += f" | StoreForward"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'RANGE_TEST_APP') or decoded.portnum == 69:
-                                            payload_info += f" RangeTest"
+                                            payload_info += f" | RangeTest"
                                         elif (hasattr(decoded.portnum, 'name') and decoded.portnum.name == 'ATAK_PLUGIN') or decoded.portnum == 72:
-                                            payload_info += f" ATAK"
+                                            payload_info += f" | ATAK"
                                         else:
                                             # For other payload types, show basic info
-                                            payload_info += f" PayloadSize:{len(decoded.payload)} bytes"
+                                            payload_info += f" | PayloadSize:{len(decoded.payload)} bytes"
                                     except Exception as e:
-                                        payload_info += f" (decode error: {str(e)[:30]})"
+                                        payload_info += f" | (decode error: {str(e)[:30]})"
                         
                         # Check if this message should be shown
-                        if should_show_message("MeshPacket", node_id, from_name, port_name, args):
+                        if should_show_message("MeshPacket", node_id, from_name, port_name, channel_info, args):
                             # Combine all information into a single line
                             info_parts = packet_info + [payload_info]
                             packet_summary = " | ".join(info_parts)
                             
-                            print(f"[{timestamp}] PACKET: {packet_summary}")
+                            line = f"[{timestamp}] PACKET: {packet_summary}"
+                            print(line)
+                            if log_file:
+                                log_file.write(line + '\n')
+                                log_file.flush()
                         
                         # Call the original handler to maintain normal operation
                         return original_packet_handler(meshPacket, hack)
@@ -528,7 +550,7 @@ def listen_with_reconnect(args):
                                 return original_from_radio(fromRadioBytes)
                             
                             # Check if this message should be shown
-                            if should_show_message(msg_type, node_id, node_name, None, args):
+                            if should_show_message(msg_type, node_id, node_name, None, None, args):
                                 # Build the output string
                                 info_str = f"{len(fromRadioBytes)} bytes | Type:{msg_type}"
                                 if extra_info:
@@ -540,16 +562,24 @@ def listen_with_reconnect(args):
                                 if len(fromRadioBytes) > 32:
                                     info_str += f"...({len(fromRadioBytes)} total)"
                                 
-                                print(f"[{timestamp}] FROM_RADIO: {info_str}")
+                                line = f"[{timestamp}] FROM_RADIO: {info_str}"
+                                print(line)
+                                if log_file:
+                                    log_file.write(line + '\n')
+                                    log_file.flush()
                             
                         except Exception as e:
                             # Show raw bytes even on decode error (if not filtered out)
-                            if not args.packets_only and should_show_message("Unknown", None, "", None, args):
+                            if not args.packets_only and should_show_message("Unknown", None, "", None, None, args):
                                 bytes_to_show = fromRadioBytes[:32] if len(fromRadioBytes) > 32 else fromRadioBytes
                                 error_info = f"{len(fromRadioBytes)} bytes | Raw data (decode error: {str(e)[:30]}) | Bytes:{bytes_to_show.hex()}"
                                 if len(fromRadioBytes) > 32:
                                     error_info += f"...({len(fromRadioBytes)} total)"
-                                print(f"[{timestamp}] FROM_RADIO: {error_info}")
+                                line = f"[{timestamp}] FROM_RADIO: {error_info}"
+                                print(line)
+                                if log_file:
+                                    log_file.write(line + '\n')
+                                    log_file.flush()
                         
                         # Call the original handler to maintain normal operation
                         return original_from_radio(fromRadioBytes)
@@ -633,6 +663,8 @@ def listen_with_reconnect(args):
                     interface.close()
                 except:
                     pass
+            if log_file:
+                log_file.close()
 
 def main():
     global connection_error_detected
@@ -643,8 +675,18 @@ def main():
         list_port_types()
         return
     
+    # Open log file if specified
+    log_file = None
+    if args.log_file:
+        try:
+            log_file = open(args.log_file, 'a')
+            print(f"Logging packets to {args.log_file}")
+        except Exception as e:
+            print(f"Error opening log file {args.log_file}: {e}")
+            log_file = None
+    
     # Print active filters
-    if any([args.filter_type, args.filter_node, args.filter_port, args.exclude_type, args.exclude_node, args.show_text]):
+    if any([args.filter_type, args.filter_node, args.filter_port, args.filter_channel, args.exclude_type, args.exclude_node, args.exclude_channel, args.show_text]):
         print("Active filters:")
         if args.filter_type:
             print(f"  Include types: {', '.join(args.filter_type)}")
@@ -652,10 +694,14 @@ def main():
             print(f"  Include nodes: {', '.join(args.filter_node)}")
         if args.filter_port:
             print(f"  Include ports: {', '.join(args.filter_port)}")
+        if args.filter_channel:
+            print(f"  Include channels: {', '.join(args.filter_channel)}")
         if args.exclude_type:
             print(f"  Exclude types: {', '.join(args.exclude_type)}")
         if args.exclude_node:
             print(f"  Exclude nodes: {', '.join(args.exclude_node)}")
+        if args.exclude_channel:
+            print(f"  Exclude channels: {', '.join(args.exclude_channel)}")
         if args.quiet_sync:
             print(f"  Quiet sync mode: ON (hiding Config, ModuleConfig, Channel)")
         if not args.show_unknown:
@@ -685,7 +731,7 @@ def main():
     root_logger.addHandler(error_handler)
     
     try:
-        listen_with_reconnect(args)
+        listen_with_reconnect(args, log_file)
     except KeyboardInterrupt:
         print("\nProgram terminated by user.")
     except Exception as e:

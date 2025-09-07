@@ -4,6 +4,7 @@ import logging
 import argparse
 import datetime
 import time
+import shlex
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -11,12 +12,16 @@ logger = logging.getLogger(__name__)
 
 def generate_haiku():
     try:
+        # Get current datetime
+        now = datetime.datetime.now()
+        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        
         # Connect to local LMStudio server (assuming default port 1234)
         url = "http://localhost:1234/v1/chat/completions"
         payload = {
             "model": "openai/gpt-oss-20b",  # Adjust if your model has a specific name
             "messages": [
-                {"role": "user", "content": "Generate a short 5-word haiku about the Forest of Dean. Consider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford."}
+                {"role": "user", "content": f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean. Consider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."}
             ],
             "temperature": 1.5
         }
@@ -33,7 +38,7 @@ def send_haiku(message, ip, channel):
     try:
         # Call send_channel_message.py
         result = subprocess.run([
-            "python", "send_channel_message.py", ip, str(channel), f'{message}'
+            "python", "send_channel_message.py", ip, str(channel), shlex.quote(message)
         ], capture_output=True, text=True)
         if result.returncode == 0:
             logger.info("Haiku sent successfully")
