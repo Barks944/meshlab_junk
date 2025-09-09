@@ -14,6 +14,28 @@ logger = logging.getLogger(__name__)
 # Global list to store recent haikus
 recent_haikus = []
 HAIKU_HISTORY_FILE = "haiku_history.json"
+LLM_LOG_FILE = "llm_messages.log"
+
+def log_llm_messages(system_message, user_message, timestamp):
+    """Log the messages sent to the LLM to a file (overwrites each time)"""
+    try:
+        with open(LLM_LOG_FILE, 'w', encoding='utf-8') as f:
+            f.write(f"=== LLM Request Log ===\n")
+            f.write(f"Timestamp: {timestamp}\n")
+            f.write(f"\n--- System Message ---\n")
+            f.write(system_message)
+            f.write(f"\n\n--- User Message ---\n")
+            f.write(user_message)
+            f.write(f"\n\n--- Recent Haiku History ---\n")
+            if recent_haikus:
+                for i, haiku in enumerate(recent_haikus[-5:], 1):  # Show last 5
+                    f.write(f"{i}. {haiku}\n")
+            else:
+                f.write("No recent haiku history\n")
+            f.write(f"\n{'='*50}\n")
+        logger.debug(f"LLM messages logged to {LLM_LOG_FILE}")
+    except Exception as e:
+        logger.error(f"Failed to log LLM messages: {e}")
 
 def load_haiku_history():
     """Load recent haiku history from file"""
@@ -52,7 +74,7 @@ def add_haiku_to_history(haiku):
 def validate_and_clean_haiku(haiku):
     """Validate and clean haiku to ensure only allowed special characters remain"""
     if not haiku:
-        return "No haiuku!"
+        return "Silent forest whispers"
     
     # Define allowed special characters
     allowed_chars = {'.', ',', ';'}
@@ -91,12 +113,35 @@ def generate_haiku():
         now = datetime.datetime.now()
         current_time = now.strftime("%Y-%m-%d %H:%M:%S")
         
+        # Create system message for better guidance
+        system_message = """You are a creative poet specializing in haiku about the Forest of Dean. 
+Create original, unique haiku that capture the essence of this beautiful forest area.
+Use ONLY these special characters: periods (.), commas (,), semicolons (;).
+Do NOT use exclamation marks, question marks, colons, dashes, quotes, parentheses, or any other special characters.
+Keep haiku to 5-7 words maximum.
+Focus on themes like: wild boar, ale, caving, coal, iron ore, steam trains, local places (Aylburton, Lydney, Cinderford, Coleford), seasonal changes, nature, history."""
+        
+        # Create user message with history to avoid repeats
+        user_message = f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean."
+        
+        # Add recent haiku history to avoid repeats
+        if recent_haikus:
+            user_message += "\n\nRecent haiku history (avoid repeating these themes or phrases):"
+            for i, old_haiku in enumerate(recent_haikus[-5:], 1):  # Show last 5
+                user_message += f"\n{i}. {old_haiku}"
+        
+        user_message += "\n\nConsider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."
+        
+        # Log the messages before sending to LLM
+        log_llm_messages(system_message, user_message, current_time)
+        
         # Connect to local LMStudio server (assuming default port 1234)
         url = "http://localhost:1234/v1/chat/completions"
         payload = {
             "model": "openai/gpt-oss-20b",  # Adjust if your model has a specific name
             "messages": [
-                {"role": "user", "content": f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean. Use ONLY these special characters: periods (.), commas (,), semicolons (;). Do NOT use exclamation marks, question marks, colons, dashes, quotes, parentheses, or any other special characters. Consider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."}
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": user_message}
             ],
             "temperature": 1.5
         }
@@ -110,6 +155,10 @@ def generate_haiku():
         
         if haiku != original_haiku:
             logger.info(f"Cleaned haiku: '{original_haiku}' -> '{haiku}'")
+        
+        # Add to history if successful
+        if haiku and haiku != "Silent forest whispers":
+            add_haiku_to_history(haiku)
         
         logger.info(f"Generated haiku: {haiku}")
         return haiku
