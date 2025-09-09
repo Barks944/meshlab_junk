@@ -3,11 +3,51 @@ import logging
 import argparse
 import datetime
 import time
+import json
+import os
 from meshtastic_sender import MeshtasticSender
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Global list to store recent haikus
+recent_haikus = []
+HAIKU_HISTORY_FILE = "haiku_history.json"
+
+def load_haiku_history():
+    """Load recent haiku history from file"""
+    global recent_haikus
+    try:
+        if os.path.exists(HAIKU_HISTORY_FILE):
+            with open(HAIKU_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                recent_haikus = json.load(f)
+                logger.info(f"Loaded {len(recent_haikus)} haikus from history")
+        else:
+            recent_haikus = []
+            logger.info("No haiku history file found, starting fresh")
+    except Exception as e:
+        logger.warning(f"Failed to load haiku history: {e}")
+        recent_haikus = []
+
+def save_haiku_history():
+    """Save recent haiku history to file"""
+    try:
+        with open(HAIKU_HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(recent_haikus, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save haiku history: {e}")
+
+def add_haiku_to_history(haiku):
+    """Add a haiku to the recent history"""
+    global recent_haikus
+    if haiku and haiku not in recent_haikus:
+        recent_haikus.append(haiku)
+        # Keep only the last 20 haikus
+        if len(recent_haikus) > 20:
+            recent_haikus = recent_haikus[-20:]
+        save_haiku_history()
+        logger.debug(f"Added haiku to history: {haiku}")
 
 def validate_and_clean_haiku(haiku):
     """Validate and clean haiku to ensure only allowed special characters remain"""
@@ -109,6 +149,9 @@ def send_haiku(sender, channel, message):
     return False
 
 def main():
+    # Load haiku history at startup
+    load_haiku_history()
+    
     parser = argparse.ArgumentParser(description="Generate haiku and send to Meshtastic channel")
     parser.add_argument("ip", help="The IP address of the device")
     parser.add_argument("channel", type=int, help="The channel index to send to (must not be 0)")
