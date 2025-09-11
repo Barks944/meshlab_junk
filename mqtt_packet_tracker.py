@@ -23,10 +23,12 @@ import threading
 from datetime import datetime
 import paho.mqtt.client as mqtt
 import meshtastic.tcp_interface
+from paho.mqtt import properties
 
 # Global storage for node information
 node_info = {}  # node_id -> {position, last_seen, etc.}
 packet_history = []  # List of recent packets
+signal_stats = {}  # node_id -> {'rssi': [], 'snr': [], 'is_local': bool}
 
 def fetch_node_info(radio_ip, interval=300):
     """Periodically fetch node information from the radio"""
@@ -40,17 +42,46 @@ def fetch_node_info(radio_ip, interval=300):
             
             if nodes:
                 for node_id, node_data in nodes.items():
+                    user_obj = node_data.get('user', {})
+                    # Try different field name variations for names
+                    short_name = (user_obj.get('short_name') or 
+                                user_obj.get('shortName') or 
+                                user_obj.get('shortname') or '')
+                    long_name = (user_obj.get('long_name') or 
+                               user_obj.get('longName') or 
+                               user_obj.get('longname') or '')
+                    
                     node_info[node_id] = {
-                        'short_name': node_data.get('user', {}).get('short_name', ''),
-                        'long_name': node_data.get('user', {}).get('long_name', ''),
+                        'short_name': short_name,
+                        'long_name': long_name,
                         'position': node_data.get('position', {}),
                         'last_seen': datetime.now().isoformat(),
                         'battery_level': node_data.get('deviceMetrics', {}).get('batteryLevel'),
                         'snr': node_data.get('snr'),
                         'rssi': node_data.get('rssi')
                     }
+                    
+                    # Initialize signal stats if not already present
+                    if node_id not in signal_stats:
+                        signal_stats[node_id] = {'rssi': [], 'snr': [], 'is_local': False}
+                        
+                    # Update with current readings if available
+                    current_rssi = node_data.get('rssi')
+                    current_snr = node_data.get('snr')
+                    if current_rssi is not None or current_snr is not None:
+                        update_signal_stats(node_id, current_rssi, current_snr)
                 
                 print(f"[{datetime.now()}] Updated info for {len(nodes)} nodes")
+                # Debug: show some node info
+                sample_nodes = list(nodes.keys())[:3]  # Show first 3 nodes
+                for node_id in sample_nodes:
+                    node_data = nodes[node_id]
+                    user_obj = node_data.get('user', {})
+                    print(f"  Debug: Radio node {node_id} -> user keys: {list(user_obj.keys()) if user_obj else 'None'}")
+                    print(f"  Debug: Radio node {node_id} -> full user: {user_obj}")
+                    short_name = user_obj.get('short_name', '') if 'short_name' in user_obj else user_obj.get('shortName', '')
+                    long_name = user_obj.get('long_name', '') if 'long_name' in user_obj else user_obj.get('longName', '')
+                    print(f"  Debug: Radio node {node_id} -> short_name: '{short_name}', long_name: '{long_name}'")
             
             # Close interface safely
             try:
@@ -99,7 +130,42 @@ def process_packet(packet_data):
     from_id = packet_data.get('from', 0)
     from_hex = f"!{from_id:08x}" if from_id else ""
     
-    print(f"\n[{datetime.now()}] Received {packet_type} packet from {from_hex}")
+    # Track signal strength for the sender
+    rssi = packet_data.get('rssi')
+    snr = packet_data.get('snr')
+    if sender_id:
+        update_signal_stats(sender_id, rssi, snr)
+    
+    # Get node name if available
+    node_name = ""
+    if from_hex in node_info:
+        short_name = node_info[from_hex].get('short_name', '')
+        long_name = node_info[from_hex].get('long_name', '')
+        print(f"  Debug: Packet from {from_hex} - found in node_info, short_name: '{short_name}', long_name: '{long_name}'")
+        if short_name:
+            node_name = f" ({short_name}"
+            if long_name and long_name != short_name:
+                node_name += f" - {long_name}"
+            node_name += ")"
+        else:
+            # Debug: show if we have node info but no name
+            print(f"  Debug: Node {from_hex} found in node_info but no short_name (long_name: '{long_name}')")
+    else:
+        # Debug: show if node not found
+        print(f"  Debug: Node {from_hex} not found in node_info (total nodes: {len(node_info)})")
+        print(f"  Debug: Available node IDs: {list(node_info.keys())[:5]}...")  # Show first 5 for debugging
+    
+    print(f"\n[{datetime.now()}] Received {packet_type} packet from {from_hex}{node_name}")
+    
+    # Show signal strength info
+    if rssi is not None or snr is not None:
+        signal_info = []
+        if rssi is not None:
+            signal_info.append(f"RSSI: {rssi}dB")
+        if snr is not None:
+            signal_info.append(f"SNR: {snr}dB")
+        if signal_info:
+            print(f"  Signal: {', '.join(signal_info)}")
     
     # Store packet in history
     packet_history.append({
@@ -127,9 +193,18 @@ def process_packet(packet_data):
         node_payload = packet_data.get('payload', {})
         node_id = node_payload.get('id', '')
         if node_id:
+            # Try different field name variations for names
+            short_name = (node_payload.get('shortname') or 
+                        node_payload.get('shortName') or 
+                        node_payload.get('short_name') or '')
+            long_name = (node_payload.get('longname') or 
+                       node_payload.get('longName') or 
+                       node_payload.get('long_name') or '')
+            
+            print(f"  Debug: Updating node_info for {node_id} with shortname: '{short_name}', longname: '{long_name}'")
             node_info[node_id] = {
-                'short_name': node_payload.get('shortname', ''),
-                'long_name': node_payload.get('longname', ''),
+                'short_name': short_name,
+                'long_name': long_name,
                 'last_seen': datetime.now().isoformat()
             }
     
@@ -138,6 +213,10 @@ def process_packet(packet_data):
         if from_hex and from_hex in node_info:
             node_info[from_hex]['battery_level'] = telemetry.get('battery_level')
             node_info[from_hex]['last_seen'] = datetime.now().isoformat()
+    
+    # Display local nodes information periodically
+    if len(packet_history) % 10 == 0:  # Every 10 packets
+        display_local_nodes()
     
     # Determine transmission location
     transmission_location = determine_transmission_location(packet_data)
@@ -175,6 +254,94 @@ def determine_transmission_location(packet_data):
     
     return None
 
+def update_signal_stats(node_id, rssi, snr):
+    """Update signal strength statistics for a node"""
+    if node_id not in signal_stats:
+        signal_stats[node_id] = {'rssi': [], 'snr': [], 'is_local': False}
+    
+    if rssi is not None:
+        signal_stats[node_id]['rssi'].append(rssi)
+        # Keep only last 10 readings
+        if len(signal_stats[node_id]['rssi']) > 10:
+            signal_stats[node_id]['rssi'].pop(0)
+    
+    if snr is not None:
+        signal_stats[node_id]['snr'].append(snr)
+        # Keep only last 10 readings
+        if len(signal_stats[node_id]['snr']) > 10:
+            signal_stats[node_id]['snr'].pop(0)
+    
+    # Analyze if this is a local node
+    analyze_local_node(node_id)
+
+def analyze_local_node(node_id):
+    """Analyze if a node is a local (1-hop) neighbor based on signal strength"""
+    if node_id not in signal_stats:
+        return
+    
+    stats = signal_stats[node_id]
+    
+    # Need at least 3 readings to make a determination
+    if len(stats['rssi']) < 3:
+        return
+    
+    # Calculate average signal strength
+    avg_rssi = sum(stats['rssi']) / len(stats['rssi'])
+    avg_snr = sum(stats['snr']) / len(stats['snr']) if stats['snr'] else 0
+    
+    # Thresholds for local node detection
+    # These are typical values - may need adjustment based on your environment
+    LOCAL_RSSI_THRESHOLD = -60  # dB - signals stronger than this are likely local
+    LOCAL_SNR_THRESHOLD = 5     # dB - SNR higher than this indicates good local connection
+    
+    # Consider a node local if it consistently has strong signal
+    is_local = (avg_rssi > LOCAL_RSSI_THRESHOLD and 
+                avg_snr > LOCAL_SNR_THRESHOLD and 
+                max(stats['rssi']) > LOCAL_RSSI_THRESHOLD - 10)  # At least one very strong reading
+    
+    stats['is_local'] = is_local
+    
+    # Update node_info if this node exists
+    if node_id in node_info:
+        node_info[node_id]['is_local'] = is_local
+        node_info[node_id]['avg_rssi'] = avg_rssi
+        node_info[node_id]['avg_snr'] = avg_snr
+
+def get_local_nodes():
+    """Get list of identified local nodes"""
+    local_nodes = []
+    for node_id, stats in signal_stats.items():
+        if stats['is_local']:
+            local_nodes.append(node_id)
+    return local_nodes
+
+def display_local_nodes():
+    """Display information about identified local nodes"""
+    local_nodes = get_local_nodes()
+    if not local_nodes:
+        return
+    
+    print(f"  Local nodes ({len(local_nodes)} identified):")
+    for node_id in local_nodes:
+        if node_id in node_info:
+            node_data = node_info[node_id]
+            short_name = node_data.get('short_name', '')
+            long_name = node_data.get('long_name', '')
+            node_name = short_name or long_name or node_id
+            
+            stats = signal_stats.get(node_id, {})
+            avg_rssi = stats.get('avg_rssi', 0)
+            avg_snr = stats.get('avg_snr', 0)
+            
+            print(f"    🔗 {node_name} (RSSI: {avg_rssi:.1f}dB, SNR: {avg_snr:.1f}dB)")
+    
+    # Clean up old signal stats (keep last 100 nodes)
+    if len(signal_stats) > 100:
+        # Remove oldest entries (simple FIFO)
+        oldest_nodes = list(signal_stats.keys())[:len(signal_stats) - 100]
+        for old_node in oldest_nodes:
+            del signal_stats[old_node]
+
 def estimate_distance_from_rssi(rssi, tx_power=-20, path_loss_exponent=2.0):
     """Rough distance estimation from RSSI (very approximate)"""
     if rssi >= tx_power:
@@ -200,7 +367,7 @@ def main():
     fetch_thread.start()
     
     # Setup MQTT client
-    client = mqtt.Client()
+    client = mqtt.Client(protocol=mqtt.MQTTv311)
     client.on_connect = on_mqtt_connect
     client.on_message = on_mqtt_message
     
