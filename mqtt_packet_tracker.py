@@ -29,6 +29,7 @@ from paho.mqtt import properties
 node_info = {}  # node_id -> {position, last_seen, etc.}
 packet_history = []  # List of recent packets
 signal_stats = {}  # node_id -> {'rssi': [], 'snr': [], 'is_local': bool}
+packet_stats = {'total': 0, 'by_type': {}, 'by_hops': {}, 'direct_packets': 0}
 
 def fetch_node_info(radio_ip, interval=300):
     """Periodically fetch node information from the radio"""
@@ -72,16 +73,6 @@ def fetch_node_info(radio_ip, interval=300):
                         update_signal_stats(node_id, current_rssi, current_snr)
                 
                 print(f"[{datetime.now()}] Updated info for {len(nodes)} nodes")
-                # Debug: show some node info
-                sample_nodes = list(nodes.keys())[:3]  # Show first 3 nodes
-                for node_id in sample_nodes:
-                    node_data = nodes[node_id]
-                    user_obj = node_data.get('user', {})
-                    print(f"  Debug: Radio node {node_id} -> user keys: {list(user_obj.keys()) if user_obj else 'None'}")
-                    print(f"  Debug: Radio node {node_id} -> full user: {user_obj}")
-                    short_name = user_obj.get('short_name', '') if 'short_name' in user_obj else user_obj.get('shortName', '')
-                    long_name = user_obj.get('long_name', '') if 'long_name' in user_obj else user_obj.get('longName', '')
-                    print(f"  Debug: Radio node {node_id} -> short_name: '{short_name}', long_name: '{long_name}'")
             
             # Close interface safely
             try:
@@ -136,12 +127,62 @@ def process_packet(packet_data):
     if sender_id:
         update_signal_stats(sender_id, rssi, snr)
     
+    # Check for 1-hop indicators
+    hops = packet_data.get('hops', -1)
+    portnum = packet_data.get('portnum', -1)
+    is_direct_packet = False
+    
+    # Method 1: Monitor 0-Hop Packets (most reliable)
+    if hops == 0:
+        is_direct_packet = True
+        print("  📡 Direct RF reception (0 hops)")
+    
+    # Method 2: Telemetry Packets (portnum == 3, typically 0 hops)
+    elif packet_type == 'telemetry' and hops == 0:
+        is_direct_packet = True
+        print("  🔋 Direct telemetry packet")
+    
+    # Method 3: Position Packets (portnum == 1, typically 0 hops)
+    elif packet_type == 'position' and hops == 0:
+        is_direct_packet = True
+        print("  📍 Direct position packet")
+    
+    # Method 4: Detection Sensor Packets (portnum == 6, typically 0 hops)
+    elif portnum == 6 and hops == 0:
+        is_direct_packet = True
+        print("  🔔 Direct detection sensor packet")
+    
+    # Method 5: Neighbor Info Module (portnum == 6 with specific payload)
+    elif portnum == 6 and packet_type == 'module':
+        payload = packet_data.get('payload', {})
+        if 'neighbors' in payload or 'neighborinfo' in str(payload).lower():
+            is_direct_packet = True
+            print("  👥 Neighbor info packet")
+            # Could parse neighbor list here if needed
+    
+    # Mark as confirmed 1-hop if any direct indicator is found
+    if is_direct_packet and from_hex:
+        if from_hex not in signal_stats:
+            signal_stats[from_hex] = {'rssi': [], 'snr': [], 'is_local': False, 'confirmed_1hop': False}
+        signal_stats[from_hex]['confirmed_1hop'] = True
+        signal_stats[from_hex]['is_local'] = True  # Override RSSI/SNR analysis for confirmed direct packets
+        
+        # Update node_info
+        if from_hex in node_info:
+            node_info[from_hex]['is_local'] = True
+            node_info[from_hex]['confirmed_1hop'] = True
+        else:
+            node_info[from_hex] = {
+                'is_local': True,
+                'confirmed_1hop': True,
+                'last_seen': datetime.now().isoformat()
+            }
+    
     # Get node name if available
     node_name = ""
     if from_hex in node_info:
         short_name = node_info[from_hex].get('short_name', '')
         long_name = node_info[from_hex].get('long_name', '')
-        print(f"  Debug: Packet from {from_hex} - found in node_info, short_name: '{short_name}', long_name: '{long_name}'")
         if short_name:
             node_name = f" ({short_name}"
             if long_name and long_name != short_name:
@@ -153,9 +194,15 @@ def process_packet(packet_data):
     else:
         # Debug: show if node not found
         print(f"  Debug: Node {from_hex} not found in node_info (total nodes: {len(node_info)})")
-        print(f"  Debug: Available node IDs: {list(node_info.keys())[:5]}...")  # Show first 5 for debugging
     
     print(f"\n[{datetime.now()}] Received {packet_type} packet from {from_hex}{node_name}")
+    
+    # Show hop information
+    if hops >= 0:
+        hop_info = f"{hops} hop{'s' if hops != 1 else ''}"
+        if hops == 0:
+            hop_info += " (direct RF)"
+        print(f"  📡 {hop_info}")
     
     # Show signal strength info
     if rssi is not None or snr is not None:
@@ -165,17 +212,24 @@ def process_packet(packet_data):
         if snr is not None:
             signal_info.append(f"SNR: {snr}dB")
         if signal_info:
-            print(f"  Signal: {', '.join(signal_info)}")
+            print(f"  📶 {', '.join(signal_info)}")
     
-    # Store packet in history
-    packet_history.append({
-        'timestamp': datetime.now().isoformat(),
-        'data': packet_data
-    })
+    # Update packet statistics
+    packet_stats['total'] += 1
     
-    # Keep only recent packets
-    if len(packet_history) > 100:
-        packet_history.pop(0)
+    # Track by packet type
+    if packet_type not in packet_stats['by_type']:
+        packet_stats['by_type'][packet_type] = 0
+    packet_stats['by_type'][packet_type] += 1
+    
+    # Track by hops
+    if hops not in packet_stats['by_hops']:
+        packet_stats['by_hops'][hops] = 0
+    packet_stats['by_hops'][hops] += 1
+    
+    # Track direct packets
+    if is_direct_packet:
+        packet_stats['direct_packets'] += 1
     
     # Update node info if this is a position or nodeinfo packet
     if packet_type == 'position':
@@ -201,7 +255,6 @@ def process_packet(packet_data):
                        node_payload.get('longName') or 
                        node_payload.get('long_name') or '')
             
-            print(f"  Debug: Updating node_info for {node_id} with shortname: '{short_name}', longname: '{long_name}'")
             node_info[node_id] = {
                 'short_name': short_name,
                 'long_name': long_name,
@@ -214,9 +267,10 @@ def process_packet(packet_data):
             node_info[from_hex]['battery_level'] = telemetry.get('battery_level')
             node_info[from_hex]['last_seen'] = datetime.now().isoformat()
     
-    # Display local nodes information periodically
-    if len(packet_history) % 10 == 0:  # Every 10 packets
+    # Display local nodes and packet statistics periodically
+    if len(packet_history) % 20 == 0:  # Every 20 packets
         display_local_nodes()
+        display_packet_stats()
     
     # Determine transmission location
     transmission_location = determine_transmission_location(packet_data)
@@ -257,7 +311,7 @@ def determine_transmission_location(packet_data):
 def update_signal_stats(node_id, rssi, snr):
     """Update signal strength statistics for a node"""
     if node_id not in signal_stats:
-        signal_stats[node_id] = {'rssi': [], 'snr': [], 'is_local': False}
+        signal_stats[node_id] = {'rssi': [], 'snr': [], 'is_local': False, 'confirmed_1hop': False}
     
     if rssi is not None:
         signal_stats[node_id]['rssi'].append(rssi)
@@ -280,6 +334,14 @@ def analyze_local_node(node_id):
         return
     
     stats = signal_stats[node_id]
+    
+    # If already confirmed as 1-hop, keep it marked as local
+    if stats.get('confirmed_1hop', False):
+        stats['is_local'] = True
+        if node_id in node_info:
+            node_info[node_id]['is_local'] = True
+            node_info[node_id]['confirmed_1hop'] = True
+        return
     
     # Need at least 3 readings to make a determination
     if len(stats['rssi']) < 3:
@@ -321,7 +383,10 @@ def display_local_nodes():
     if not local_nodes:
         return
     
-    print(f"  Local nodes ({len(local_nodes)} identified):")
+    confirmed_count = sum(1 for node_id in local_nodes if signal_stats.get(node_id, {}).get('confirmed_1hop', False))
+    estimated_count = len(local_nodes) - confirmed_count
+    
+    print(f"  Local nodes ({len(local_nodes)} identified: {confirmed_count} confirmed, {estimated_count} estimated):")
     for node_id in local_nodes:
         if node_id in node_info:
             node_data = node_info[node_id]
@@ -332,8 +397,13 @@ def display_local_nodes():
             stats = signal_stats.get(node_id, {})
             avg_rssi = stats.get('avg_rssi', 0)
             avg_snr = stats.get('avg_snr', 0)
+            is_confirmed = stats.get('confirmed_1hop', False)
             
-            print(f"    🔗 {node_name} (RSSI: {avg_rssi:.1f}dB, SNR: {avg_snr:.1f}dB)")
+            # Show different icons for confirmed vs estimated
+            icon = "🔗" if is_confirmed else "📶"
+            status = "confirmed" if is_confirmed else "estimated"
+            
+            print(f"    {icon} {node_name} ({status}) - RSSI: {avg_rssi:.1f}dB, SNR: {avg_snr:.1f}dB")
     
     # Clean up old signal stats (keep last 100 nodes)
     if len(signal_stats) > 100:
@@ -341,6 +411,35 @@ def display_local_nodes():
         oldest_nodes = list(signal_stats.keys())[:len(signal_stats) - 100]
         for old_node in oldest_nodes:
             del signal_stats[old_node]
+
+def display_packet_stats():
+    """Display packet statistics"""
+    if packet_stats['total'] == 0:
+        return
+    
+    print(f"\n📊 Packet Statistics (Total: {packet_stats['total']}):")
+    
+    # Packet types
+    print("  By Type:")
+    for packet_type, count in sorted(packet_stats['by_type'].items()):
+        percentage = (count / packet_stats['total']) * 100
+        print(f"    {packet_type}: {count} ({percentage:.1f}%)")
+    
+    # Hop distribution
+    print("  By Hops:")
+    for hops, count in sorted(packet_stats['by_hops'].items()):
+        if hops == -1:
+            hop_desc = "unknown"
+        elif hops == 0:
+            hop_desc = "direct (0)"
+        else:
+            hop_desc = f"{hops}"
+        percentage = (count / packet_stats['total']) * 100
+        print(f"    {hop_desc} hops: {count} ({percentage:.1f}%)")
+    
+    # Direct packets
+    direct_percentage = (packet_stats['direct_packets'] / packet_stats['total']) * 100
+    print(f"  Direct RF packets: {packet_stats['direct_packets']} ({direct_percentage:.1f}%)")
 
 def estimate_distance_from_rssi(rssi, tx_power=-20, path_loss_exponent=2.0):
     """Rough distance estimation from RSSI (very approximate)"""
