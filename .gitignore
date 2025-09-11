@@ -2,3 +2,4 @@
 *.pyc
 *.png
 haiku_history.json
+*.csv
