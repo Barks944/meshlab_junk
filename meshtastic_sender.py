@@ -65,6 +65,16 @@ class MeshtasticSender:
                 self.interface._handlePacketFromRadio = packet_handler
                 self.interface._handleFromRadio = from_radio_handler
 
+                # Stop the heartbeat to prevent connection reset errors
+                if hasattr(self.interface, 'stopHeartbeat'):
+                    try:
+                        self.interface.stopHeartbeat()
+                        logger.info("Heartbeat stopped to prevent connection issues")
+                    except Exception as e:
+                        logger.warning(f"Could not stop heartbeat: {str(e)}")
+                else:
+                    logger.warning("stopHeartbeat method not available")
+
                 return True
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{RETRY_COUNT} failed: {str(e)}")
@@ -79,7 +89,10 @@ class MeshtasticSender:
         # This method is no longer needed as we use handlers
         pass
 
-    def send_message(self, channel, message, no_wait=False):
+    def send_message(self, channel, message, no_wait=False, retry=True):
+        if self.interface is None:
+            logger.error("Interface is not connected")
+            return False
         try:
             logger.info(f"Sending message: '{message}' to channel {channel}")
             # Send the message
@@ -113,6 +126,24 @@ class MeshtasticSender:
                     continue
 
             logger.error("Timeout waiting for QueueStatus")
+            if retry:
+                logger.info("Timeout detected, attempting to reconnect...")
+                self.close()
+                if self.connect():
+                    logger.info("Reconnected, retrying send...")
+                    return self.send_message(channel, message, no_wait, retry=False)
+                else:
+                    logger.error("Failed to reconnect after timeout")
+            return False
+        except ConnectionResetError as e:
+            logger.error(f"Connection reset error: {str(e)}. Attempting to reconnect...")
+            if retry:
+                self.close()
+                if self.connect():
+                    logger.info("Reconnected successfully. Retrying send...")
+                    return self.send_message(channel, message, no_wait, retry=False)  # Retry once
+                else:
+                    logger.error("Failed to reconnect")
             return False
         except Exception as e:
             logger.error(f"Error sending message: {str(e)}")
