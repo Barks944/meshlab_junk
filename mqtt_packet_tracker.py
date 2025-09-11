@@ -127,38 +127,57 @@ def process_packet(packet_data):
     if sender_id:
         update_signal_stats(sender_id, rssi, snr)
     
-    # Check for 1-hop indicators
+    # Check for 1-hop indicators (MQTT packets may not have explicit hop info)
     hops = packet_data.get('hops', -1)
-    portnum = packet_data.get('portnum', -1)
+    portnum = packet_data.get('portnum', packet_data.get('portNum', -1))
+    
+    # For MQTT packets, check payload for additional info
+    payload = packet_data.get('payload', {})
+    if isinstance(payload, dict):
+        hops = payload.get('hops', payload.get('hop_count', hops))
+        portnum = payload.get('portnum', payload.get('portNum', portnum))
+    
+    # Debug: show packet structure info
+    if packet_stats['total'] <= 5:  # Only show for first few packets
+        print(f"  Debug: portnum={portnum}, hops={hops}, payload_keys={list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+    
     is_direct_packet = False
     
-    # Method 1: Monitor 0-Hop Packets (most reliable)
+    # Method 1: Monitor 0-Hop Packets (if available)
     if hops == 0:
         is_direct_packet = True
         print("  📡 Direct RF reception (0 hops)")
     
-    # Method 2: Telemetry Packets (portnum == 3, typically 0 hops)
-    elif packet_type == 'telemetry' and hops == 0:
+    # Method 2: Telemetry Packets (portnum == 3, typically direct)
+    elif packet_type == 'telemetry':
         is_direct_packet = True
-        print("  🔋 Direct telemetry packet")
+        print("  🔋 Telemetry packet (likely direct)")
     
-    # Method 3: Position Packets (portnum == 1, typically 0 hops)
-    elif packet_type == 'position' and hops == 0:
+    # Method 3: Position Packets (typically direct)
+    elif packet_type == 'position':
         is_direct_packet = True
-        print("  📍 Direct position packet")
+        print("  📍 Position packet (likely direct)")
     
-    # Method 4: Detection Sensor Packets (portnum == 6, typically 0 hops)
-    elif portnum == 6 and hops == 0:
+    # Method 4: Detection Sensor Packets (portnum == 6)
+    elif portnum == 6:
         is_direct_packet = True
-        print("  🔔 Direct detection sensor packet")
+        print("  🔔 Detection sensor packet (likely direct)")
     
-    # Method 5: Neighbor Info Module (portnum == 6 with specific payload)
+    # Method 5: Neighbor Info Module
     elif portnum == 6 and packet_type == 'module':
-        payload = packet_data.get('payload', {})
-        if 'neighbors' in payload or 'neighborinfo' in str(payload).lower():
+        if 'neighbors' in str(payload).lower() or 'neighborinfo' in str(payload).lower():
             is_direct_packet = True
             print("  👥 Neighbor info packet")
-            # Could parse neighbor list here if needed
+    
+    # Method 6: Strong signal packets (likely direct to gateway)
+    elif rssi is not None and rssi > -90:  # Strong signal threshold
+        is_direct_packet = True
+        print("  📡 Strong signal packet (likely direct)")
+    
+    # Method 7: Range Test packets
+    elif 'range' in packet_type.lower() or 'test' in packet_type.lower():
+        is_direct_packet = True
+        print("  🎯 Range test packet")
     
     # Mark as confirmed 1-hop if any direct indicator is found
     if is_direct_packet and from_hex:
@@ -203,6 +222,10 @@ def process_packet(packet_data):
         if hops == 0:
             hop_info += " (direct RF)"
         print(f"  📡 {hop_info}")
+    elif is_direct_packet:
+        print("  📡 Likely direct (based on packet type/signal)")
+    else:
+        print("  📡 Hop count unknown")
     
     # Show signal strength info
     if rssi is not None or snr is not None:
@@ -437,9 +460,9 @@ def display_packet_stats():
         percentage = (count / packet_stats['total']) * 100
         print(f"    {hop_desc} hops: {count} ({percentage:.1f}%)")
     
-    # Direct packets
+    # Direct packets (detected by various methods)
     direct_percentage = (packet_stats['direct_packets'] / packet_stats['total']) * 100
-    print(f"  Direct RF packets: {packet_stats['direct_packets']} ({direct_percentage:.1f}%)")
+    print(f"  Likely direct packets: {packet_stats['direct_packets']} ({direct_percentage:.1f}%)")
 
 def estimate_distance_from_rssi(rssi, tx_power=-20, path_loss_exponent=2.0):
     """Rough distance estimation from RSSI (very approximate)"""
