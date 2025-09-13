@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 MESHTASTIC_PORT = 4403  # Default TCP port for Meshtastic
 RETRY_COUNT = 3  # Number of retries for connection
 RETRY_DELAY = 5  # Seconds to wait between retries
-QUEUE_STATUS_TIMEOUT = 10  # Seconds to wait for QueueStatus
+QUEUE_STATUS_TIMEOUT = 15  # Seconds to wait for QueueStatus (increased from 10)
+CONNECTION_STABILITY_DELAY = 2  # Seconds to wait after connection for stability
 
 class MeshtasticSender:
     def __init__(self, ip):
@@ -66,16 +67,42 @@ class MeshtasticSender:
                 self.interface._handleFromRadio = from_radio_handler
 
                 # Stop the heartbeat to prevent connection reset errors
-                if hasattr(self.interface, 'stopHeartbeat'):
-                    try:
-                        self.interface.stopHeartbeat()
-                        logger.info("Heartbeat stopped to prevent connection issues")
-                    except Exception as e:
-                        logger.warning(f"Could not stop heartbeat: {str(e)}")
-                else:
-                    logger.warning("stopHeartbeat method not available")
+                self._stop_heartbeat_safely()
+                
+                # Wait for connection stability
+                logger.info(f"Waiting {CONNECTION_STABILITY_DELAY} seconds for connection stability...")
+                time.sleep(CONNECTION_STABILITY_DELAY)
 
                 return True
+            except ConnectionAbortedError as e:
+                logger.error(f"Connection aborted (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
+                if attempt < RETRY_COUNT:
+                    logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error("All connection attempts failed due to connection abortion.")
+            except ConnectionResetError as e:
+                logger.error(f"Connection reset (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
+                if attempt < RETRY_COUNT:
+                    logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error("All connection attempts failed due to connection reset.")
+            except OSError as e:
+                if hasattr(e, 'winerror') and e.winerror == 10053:
+                    logger.error(f"Connection aborted by host (WinError 10053) (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
+                    if attempt < RETRY_COUNT:
+                        logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        logger.error("All connection attempts failed due to host aborting connection.")
+                else:
+                    logger.error(f"OS error (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
+                    if attempt < RETRY_COUNT:
+                        logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
+                        time.sleep(RETRY_DELAY)
+                    else:
+                        logger.error("All connection attempts failed.")
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{RETRY_COUNT} failed: {str(e)}")
                 if attempt < RETRY_COUNT:
@@ -85,68 +112,193 @@ class MeshtasticSender:
                     logger.error("All retry attempts failed.")
         return False
 
-    def _listen_for_packets(self):
-        # This method is no longer needed as we use handlers
-        pass
+    def _stop_heartbeat_safely(self):
+        """Safely stop the heartbeat to prevent connection issues"""
+        if self.interface is None:
+            return
+            
+        # Try to stop heartbeat using method if available
+        stop_method = getattr(self.interface, 'stopHeartbeat', None)
+        if stop_method:
+            try:
+                stop_method()
+                logger.info("Heartbeat stopped to prevent connection issues")
+            except Exception as e:
+                logger.warning(f"Could not stop heartbeat: {str(e)}")
+        else:
+            logger.warning("stopHeartbeat method not available")
+            
+        # Additional heartbeat prevention - try to disable it through localNode
+        try:
+            local_node = getattr(self.interface, 'localNode', None)
+            if local_node:
+                # Try to set heartbeat interval to a very large value to effectively disable it
+                set_interval_method = getattr(local_node, 'setHeartbeatInterval', None)
+                if set_interval_method:
+                    set_interval_method(86400)  # 24 hours
+                    logger.info("Heartbeat interval set to 24 hours to prevent connection issues")
+                elif hasattr(local_node, 'heartbeatInterval'):
+                    local_node.heartbeatInterval = 86400
+                    logger.info("Heartbeat interval set to 24 hours to prevent connection issues")
+        except Exception as e:
+            logger.debug(f"Could not modify heartbeat interval: {str(e)}")
 
     def send_message(self, channel, message, no_wait=False, retry=True):
         if self.interface is None:
             logger.error("Interface is not connected")
             return False
-        try:
-            logger.info(f"Sending message: '{message}' to channel {channel}")
-            # Send the message
-            sent_packet = self.interface.sendText(message, channelIndex=channel)
-            if not sent_packet:
-                logger.error("Failed to send message: No packet returned")
+        
+        max_send_retries = 2 if retry else 0
+        
+        for send_attempt in range(max_send_retries + 1):
+            # Check connection health before attempting send
+            if not self._check_connection_health():
+                logger.warning("Connection health check failed, attempting recovery...")
+                if not self._attempt_connection_recovery():
+                    logger.error("Connection recovery failed")
+                    return False
+            
+            try:
+                logger.info(f"Sending message: '{message}' to channel {channel}")
+                # Send the message
+                sent_packet = self.interface.sendText(message, channelIndex=channel)
+                if not sent_packet:
+                    logger.error("Failed to send message: No packet returned")
+                    return False
+
+                packet_id = sent_packet.id
+                logger.info(f"Message sent with packet ID: {packet_id}")
+
+                if no_wait:
+                    logger.info("Skipping QueueStatus confirmation as requested")
+                    return True
+
+                # Wait for QueueStatus with improved timeout handling
+                return self._wait_for_queue_status(packet_id)
+                
+            except ConnectionAbortedError as e:
+                logger.error(f"Connection aborted during send (attempt {send_attempt + 1}): {str(e)}")
+                if send_attempt < max_send_retries:
+                    logger.info("Attempting to reconnect...")
+                    self.close()
+                    if self.connect():
+                        logger.info("Reconnected, retrying send...")
+                        continue
+                    else:
+                        logger.error("Failed to reconnect after connection abort")
+                        return False
+                else:
+                    logger.error("All send attempts failed due to connection abortion")
+                    return False
+                    
+            except ConnectionResetError as e:
+                logger.error(f"Connection reset during send (attempt {send_attempt + 1}): {str(e)}")
+                if send_attempt < max_send_retries:
+                    logger.info("Attempting to reconnect...")
+                    self.close()
+                    if self.connect():
+                        logger.info("Reconnected, retrying send...")
+                        continue
+                    else:
+                        logger.error("Failed to reconnect after connection reset")
+                        return False
+                else:
+                    logger.error("All send attempts failed due to connection reset")
+                    return False
+                    
+            except OSError as e:
+                if hasattr(e, 'winerror') and e.winerror == 10053:
+                    logger.error(f"Connection aborted by host during send (attempt {send_attempt + 1}): {str(e)}")
+                    if send_attempt < max_send_retries:
+                        logger.info("Attempting to reconnect...")
+                        self.close()
+                        if self.connect():
+                            logger.info("Reconnected, retrying send...")
+                            continue
+                        else:
+                            logger.error("Failed to reconnect after host abort")
+                            return False
+                    else:
+                        logger.error("All send attempts failed due to host aborting connection")
+                        return False
+                else:
+                    logger.error(f"OS error during send (attempt {send_attempt + 1}): {str(e)}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Error sending message (attempt {send_attempt + 1}): {str(e)}")
+                if send_attempt < max_send_retries:
+                    logger.info("Retrying send...")
+                    continue
+                else:
+                    logger.error("All send attempts failed")
+                    return False
+        
+        return False
+
+    def _wait_for_queue_status(self, packet_id):
+        """Wait for QueueStatus confirmation with improved error handling"""
+        start_time = time.time()
+        consecutive_timeouts = 0
+        max_consecutive_timeouts = 3
+        
+        while time.time() - start_time < QUEUE_STATUS_TIMEOUT:
+            try:
+                # Use a shorter timeout to be more responsive
+                item = self.packet_queue.get(timeout=0.5)
+                if item[0] == 'queueStatus':
+                    qs = item[1]
+                    if qs.mesh_packet_id == packet_id:
+                        if qs.res == 0:  # ERRNO_OK
+                            logger.info("Message queued successfully for transmission")
+                            return True
+                        else:
+                            logger.error(f"Message failed to queue: Error code {qs.res}")
+                            return False
+                consecutive_timeouts = 0  # Reset on successful queue operation
+                
+            except queue.Empty:
+                consecutive_timeouts += 1
+                if consecutive_timeouts >= max_consecutive_timeouts:
+                    logger.warning(f"Multiple consecutive timeouts ({consecutive_timeouts}), connection may be unstable")
+                continue
+            except Exception as e:
+                logger.error(f"Error while waiting for queue status: {str(e)}")
                 return False
 
-            packet_id = sent_packet.id
-            logger.info(f"Message sent with packet ID: {packet_id}")
+        logger.error(f"Timeout waiting for QueueStatus after {QUEUE_STATUS_TIMEOUT} seconds")
+        return False
 
-            if no_wait:
-                logger.info("Skipping QueueStatus confirmation as requested")
+    def _check_connection_health(self):
+        """Check if the connection is still healthy"""
+        if self.interface is None:
+            return False
+            
+        try:
+            # Try to access a basic property to check if connection is alive
+            if hasattr(self.interface, 'localNode') and self.interface.localNode:
+                # If we can access localNode, connection is likely healthy
                 return True
-
-            # Wait for QueueStatus
-            start_time = time.time()
-            while time.time() - start_time < QUEUE_STATUS_TIMEOUT:
-                try:
-                    item = self.packet_queue.get(timeout=1)
-                    if item[0] == 'queueStatus':
-                        qs = item[1]
-                        if qs.mesh_packet_id == packet_id:
-                            if qs.res == 0:  # ERRNO_OK
-                                logger.info("Message queued successfully for transmission")
-                                return True
-                            else:
-                                logger.error(f"Message failed to queue: Error code {qs.res}")
-                                return False
-                except queue.Empty:
-                    continue
-
-            logger.error("Timeout waiting for QueueStatus")
-            if retry:
-                logger.info("Timeout detected, attempting to reconnect...")
-                self.close()
-                if self.connect():
-                    logger.info("Reconnected, retrying send...")
-                    return self.send_message(channel, message, no_wait, retry=False)
-                else:
-                    logger.error("Failed to reconnect after timeout")
-            return False
-        except ConnectionResetError as e:
-            logger.error(f"Connection reset error: {str(e)}. Attempting to reconnect...")
-            if retry:
-                self.close()
-                if self.connect():
-                    logger.info("Reconnected successfully. Retrying send...")
-                    return self.send_message(channel, message, no_wait, retry=False)  # Retry once
-                else:
-                    logger.error("Failed to reconnect")
-            return False
+            else:
+                logger.warning("Connection health check failed: localNode not accessible")
+                return False
         except Exception as e:
-            logger.error(f"Error sending message: {str(e)}")
+            logger.warning(f"Connection health check failed: {str(e)}")
+            return False
+
+    def _attempt_connection_recovery(self):
+        """Attempt to recover a broken connection"""
+        logger.info("Attempting connection recovery...")
+        
+        # Close existing connection
+        self.close()
+        
+        # Try to reconnect
+        if self.connect():
+            logger.info("Connection recovery successful")
+            return True
+        else:
+            logger.error("Connection recovery failed")
             return False
 
     def close(self):
