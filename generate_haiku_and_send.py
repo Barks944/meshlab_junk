@@ -5,6 +5,7 @@ import datetime
 import time
 import json
 import os
+from typing import Optional
 from meshtastic_sender import MeshtasticSender
 
 # Configure logging
@@ -106,65 +107,89 @@ def validate_and_clean_haiku(haiku):
     
     return result.strip()
 
-def generate_haiku():
+def generate_haiku(llm_timeout: int = 25, llm_retries: int = 2) -> Optional[str]:
+    """Generate a haiku using local LLM with timeout and retries.
+
+    Args:
+        llm_timeout: Total request timeout (seconds). Applied to both connect/read via tuple.
+        llm_retries: Number of additional retries (beyond first attempt) on transient failures.
+    """
     logger.info("Starting haiku generation...")
-    try:
-        # Get current datetime
-        now = datetime.datetime.now()
-        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Create system message for better guidance
-        system_message = """You are a creative poet specializing in haiku about the Forest of Dean. 
-Create original, unique haiku that capture the essence of this beautiful forest area.
-Use ONLY these special characters: periods (.), commas (,), semicolons (;).
-Do NOT use exclamation marks, question marks, colons, dashes, quotes, parentheses, or any other special characters.
-Keep haiku to 5-7 words maximum.
-Focus on themes like: wild boar, ale, caving, coal, iron ore, steam trains, local places (Aylburton, Lydney, Cinderford, Coleford), seasonal changes, nature, history."""
-        
-        # Create user message with history to avoid repeats
-        user_message = f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean."
-        
-        # Add recent haiku history to avoid repeats
-        if recent_haikus:
-            user_message += "\n\nRecent haiku history (avoid repeating these themes or phrases):"
-            for i, old_haiku in enumerate(recent_haikus[-5:], 1):  # Show last 5
-                user_message += f"\n{i}. {old_haiku}"
-        
-        user_message += "\n\nConsider topics like wild boar, ale, caving, coal, iron ore, steam trains, local places like aylburton or lydney, cinderford or coleford. Consider the season."
-        
-        # Log the messages before sending to LLM
-        log_llm_messages(system_message, user_message, current_time)
-        
-        # Connect to local LMStudio server (assuming default port 1234)
-        url = "http://localhost:1234/v1/chat/completions"
-        payload = {
-            "model": "openai/gpt-oss-20b",  # Adjust if your model has a specific name
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
-            ],
-            "temperature": 1.5
-        }
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        haiku = response.json()["choices"][0]["message"]["content"].strip()
-        
-        # Validate and clean the haiku
-        original_haiku = haiku
-        haiku = validate_and_clean_haiku(haiku)
-        
-        if haiku != original_haiku:
-            logger.info(f"Cleaned haiku: '{original_haiku}' -> '{haiku}'")
-        
-        # Add to history if successful
-        if haiku and haiku != "Silent forest whispers":
-            add_haiku_to_history(haiku)
-        
-        logger.info(f"Generated haiku: {haiku}")
-        return haiku
-    except Exception as e:
-        logger.error(f"Failed to generate haiku: {str(e)}")
-        return None
+    # Clamp parameters
+    llm_timeout = max(5, llm_timeout)
+    llm_retries = max(0, min(llm_retries, 5))
+
+    # Prepare static prompt parts once
+    now = datetime.datetime.now()
+    current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+    system_message = (
+        "You are a creative poet specializing in haiku about the Forest of Dean. "
+        "Create original, unique haiku that capture the essence of this beautiful forest area.\n"
+        "Use ONLY these special characters: periods (.), commas (,), semicolons (;).\n"
+        "Do NOT use exclamation marks, question marks, colons, dashes, quotes, parentheses, or any other special characters.\n"
+        "Keep haiku to 5-7 words maximum.\n"
+        "Focus on themes like: wild boar, ale, caving, coal, iron ore, steam trains, local places (Aylburton, Lydney, Cinderford, Coleford), seasonal changes, nature, history."
+    )
+
+    user_message = f"Current time: {current_time}. Generate a short 5-word haiku about the Forest of Dean."
+    if recent_haikus:
+        user_message += "\n\nRecent haiku history (avoid repeating these themes or phrases):"
+        for i, old_haiku in enumerate(recent_haikus[-5:], 1):
+            user_message += f"\n{i}. {old_haiku}"
+    user_message += (
+        "\n\nConsider topics like wild boar, ale, caving, coal, iron ore, steam trains, "
+        "local places like aylburton or lydney, cinderford or coleford. Consider the season."
+    )
+
+    log_llm_messages(system_message, user_message, current_time)
+
+    url = "http://localhost:1234/v1/chat/completions"
+    payload = {
+        "model": "openai/gpt-oss-20b",
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": 1.5,
+    }
+
+    attempt = 0
+    backoff = 3
+    while attempt <= llm_retries:
+        attempt += 1
+        try:
+            logger.info(f"LLM request attempt {attempt}/{llm_retries + 1} (timeout {llm_timeout}s)")
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=(min(5, llm_timeout // 2), llm_timeout),  # (connect, read)
+            )
+            response.raise_for_status()
+            data = response.json()
+            haiku_raw = data["choices"][0]["message"]["content"].strip()
+            original_haiku = haiku_raw
+            haiku_clean = validate_and_clean_haiku(haiku_raw)
+            if haiku_clean != original_haiku:
+                logger.info(f"Cleaned haiku: '{original_haiku}' -> '{haiku_clean}'")
+            if haiku_clean and haiku_clean != "Silent forest whispers":
+                add_haiku_to_history(haiku_clean)
+            logger.info(f"Generated haiku: {haiku_clean}")
+            return haiku_clean
+        except (requests.Timeout, requests.ConnectionError) as e:
+            logger.warning(f"Transient LLM error: {e}")
+            if attempt <= llm_retries:
+                logger.info(f"Retrying LLM request in {backoff}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            else:
+                break
+        except Exception as e:
+            logger.error(f"Failed to generate haiku (non-retryable): {e}")
+            break
+
+    logger.error("All LLM attempts failed; returning fallback haiku")
+    return None
 
 def send_haiku(sender, channel, message):
     max_retries = 3
@@ -205,6 +230,9 @@ def main():
     parser.add_argument("ip", help="The IP address of the device")
     parser.add_argument("channel", type=int, help="The channel index to send to (must not be 0)")
     parser.add_argument("--repeat-every", type=int, default=None, help="Repeat the message every X seconds. If not specified, send once.")
+    parser.add_argument("--llm-timeout", type=int, default=25, help="Timeout in seconds for the LLM request (default 25)")
+    parser.add_argument("--llm-retries", type=int, default=2, help="Number of retries for the LLM request on timeout/connection errors (default 2)")
+    parser.add_argument("--connect-timeout", type=int, default=10, help="Timeout in seconds for a single Meshtastic connection attempt (default 10)")
     args = parser.parse_args()
     
     # Validate channel
@@ -221,14 +249,14 @@ def main():
                 sequence = (sequence + 1) % 1000
                 
                 # Generate haiku before opening connection
-                haiku = generate_haiku()
+                haiku = generate_haiku(args.llm_timeout, args.llm_retries)
                 if haiku:
                     now = datetime.datetime.now()
                     compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
                     full_haiku = f"{compact_dt} #{current_sequence} {haiku}"
                     
                     # Open connection, send, then close
-                    sender = MeshtasticSender(args.ip)
+                    sender = MeshtasticSender(args.ip, connect_timeout=args.connect_timeout)
                     if sender.connect():
                         try:
                             if send_haiku(sender, args.channel, full_haiku):
@@ -247,14 +275,14 @@ def main():
             logger.info("Script stopped by user.")
     else:
         # Single message: generate haiku first, then connect and send
-        haiku = generate_haiku()
+        haiku = generate_haiku(args.llm_timeout, args.llm_retries)
         if haiku:
             now = datetime.datetime.now()
             compact_dt = f"{now.month}/{now.day}/{now.year % 100}@{now.hour:02d}{now.minute:02d}"
             full_haiku = f"{compact_dt} {haiku}"
             
             # Open connection, send, then close
-            sender = MeshtasticSender(args.ip)
+            sender = MeshtasticSender(args.ip, connect_timeout=args.connect_timeout)
             if sender.connect():
                 try:
                     send_haiku(sender, args.channel, full_haiku)

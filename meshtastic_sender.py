@@ -6,6 +6,7 @@ import datetime
 import argparse
 import threading
 import queue
+from typing import Optional, Protocol, Union, Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,19 +18,61 @@ RETRY_DELAY = 5  # Seconds to wait between retries
 QUEUE_STATUS_TIMEOUT = 15  # Seconds to wait for QueueStatus (increased from 10)
 CONNECTION_STABILITY_DELAY = 2  # Seconds to wait after connection for stability
 
+class _QueueStatusLike(Protocol):
+    mesh_packet_id: Any
+    res: Any
+
+
 class MeshtasticSender:
-    def __init__(self, ip):
+    def __init__(self, ip: str, connect_timeout: int = 10):
+        """Create a sender.
+
+        Args:
+            ip: Device IP address.
+            connect_timeout: Seconds to wait for a single low-level TCPInterface construction
+                before considering the attempt failed. This guards against library calls that
+                occasionally block indefinitely when a device is unresponsive.
+        """
         self.ip = ip
-        self.interface = None
-        self.packet_queue = queue.Queue()
+        self.connect_timeout = max(1, int(connect_timeout))
+        self.interface: Optional[meshtastic.tcp_interface.TCPInterface] = None
+        self.packet_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.stop_event = threading.Event()
-        self.listener_thread = None
+        self.listener_thread: Optional[threading.Thread] = None
 
     def connect(self):
         for attempt in range(1, RETRY_COUNT + 1):
             try:
-                logger.info(f"Attempt {attempt}/{RETRY_COUNT}: Connecting to device at {self.ip}...")
-                self.interface = meshtastic.tcp_interface.TCPInterface(self.ip)
+                logger.info(f"Attempt {attempt}/{RETRY_COUNT}: Connecting to device at {self.ip} (timeout {self.connect_timeout}s)...")
+
+                # Perform potentially blocking construction in a thread so we can impose a timeout
+                result: dict[str, object] = {}
+
+                def _build_interface():
+                    try:
+                        result["interface"] = meshtastic.tcp_interface.TCPInterface(self.ip)
+                    except BaseException as e:  # Store exception for handling outside
+                        result["error"] = e
+
+                t = threading.Thread(target=_build_interface, daemon=True)
+                t.start()
+                t.join(self.connect_timeout)
+
+                if t.is_alive():
+                    logger.error(f"Connect attempt exceeded timeout of {self.connect_timeout}s; abandoning attempt")
+                    # Thread left running (daemon) – allow retry loop to proceed
+                    raise TimeoutError(f"Interface creation timed out after {self.connect_timeout}s")
+
+                if "error" in result:
+                    err = result["error"]
+                    if isinstance(err, BaseException):
+                        raise err
+                    else:
+                        raise RuntimeError("Unknown non-exception error captured during connect")
+
+                self.interface = result.get("interface")  # type: ignore[assignment]
+                if self.interface is None:
+                    raise RuntimeError("TCPInterface creation returned None")
                 logger.info("TCP connection established successfully")
 
                 if not hasattr(self.interface, 'localNode') or self.interface.localNode is None:
@@ -74,6 +117,13 @@ class MeshtasticSender:
                 time.sleep(CONNECTION_STABILITY_DELAY)
 
                 return True
+            except TimeoutError as e:
+                logger.error(f"Timeout establishing connection (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
+                if attempt < RETRY_COUNT:
+                    logger.info(f"Retrying connection in {RETRY_DELAY} seconds...")
+                    time.sleep(RETRY_DELAY)
+                else:
+                    logger.error("All connection attempts failed due to timeout.")
             except ConnectionAbortedError as e:
                 logger.error(f"Connection aborted (attempt {attempt}/{RETRY_COUNT}): {str(e)}")
                 if attempt < RETRY_COUNT:
@@ -247,14 +297,20 @@ class MeshtasticSender:
                 # Use a shorter timeout to be more responsive
                 item = self.packet_queue.get(timeout=0.5)
                 if item[0] == 'queueStatus':
-                    qs = item[1]
-                    if qs.mesh_packet_id == packet_id:
-                        if qs.res == 0:  # ERRNO_OK
-                            logger.info("Message queued successfully for transmission")
-                            return True
-                        else:
-                            logger.error(f"Message failed to queue: Error code {qs.res}")
-                            return False
+                    qs_raw = item[1]
+                    try:
+                        qs: _QueueStatusLike = qs_raw  # type: ignore[assignment]
+                        if getattr(qs, 'mesh_packet_id', None) == packet_id:
+                            res_val = getattr(qs, 'res', None)
+                            if res_val == 0:  # ERRNO_OK
+                                logger.info("Message queued successfully for transmission")
+                                return True
+                            else:
+                                logger.error(f"Message failed to queue: Error code {res_val}")
+                                return False
+                    except Exception:
+                        # If structure unexpected, continue waiting
+                        continue
                 consecutive_timeouts = 0  # Reset on successful queue operation
                 
             except queue.Empty:
