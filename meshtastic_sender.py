@@ -39,6 +39,8 @@ class MeshtasticSender:
         self.packet_queue: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.stop_event = threading.Event()
         self.listener_thread: Optional[threading.Thread] = None
+        self._closed: bool = False
+        self._original_send_heartbeat = None
 
     def connect(self):
         for attempt in range(1, RETRY_COUNT + 1):
@@ -111,6 +113,25 @@ class MeshtasticSender:
 
                 # Stop the heartbeat to prevent connection reset errors
                 self._stop_heartbeat_safely()
+
+                # Monkeypatch sendHeartbeat to be no-op after close to avoid late timer callbacks
+                if hasattr(self.interface, 'sendHeartbeat') and not self._original_send_heartbeat:
+                    self._original_send_heartbeat = getattr(self.interface, 'sendHeartbeat')
+                    sender_ref = self
+                    def _guarded_send_heartbeat(*a, **kw):  # type: ignore[override]
+                        if sender_ref._closed:
+                            logger.debug("Heartbeat suppressed post-close")
+                            return None
+                        try:
+                            return sender_ref._original_send_heartbeat(*a, **kw)  # type: ignore[misc]
+                        except Exception as e:
+                            logger.debug(f"Heartbeat call failed: {e}")
+                            return None
+                    try:
+                        setattr(self.interface, 'sendHeartbeat', _guarded_send_heartbeat)
+                        logger.info("sendHeartbeat patched with close guard")
+                    except Exception as e:
+                        logger.debug(f"Could not patch sendHeartbeat: {e}")
                 
                 # Wait for connection stability
                 logger.info(f"Waiting {CONNECTION_STABILITY_DELAY} seconds for connection stability...")
@@ -359,6 +380,15 @@ class MeshtasticSender:
 
     def close(self):
         if self.interface:
+            self._closed = True
+            # Attempt to cancel any heartbeat timers on the interface
+            try:
+                timer = getattr(self.interface, 'heartbeatTimer', None)
+                if timer and hasattr(timer, 'cancel'):
+                    timer.cancel()
+                    logger.info("Heartbeat timer cancelled")
+            except Exception as e:
+                logger.debug(f"Could not cancel heartbeat timer: {e}")
             try:
                 self.interface.close()
                 logger.info("Interface closed")
